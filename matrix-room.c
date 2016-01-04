@@ -29,6 +29,10 @@
 #include <libpurple/connection.h>
 #include <libpurple/debug.h>
 
+#include "connection.h"
+#include "roomlist.h"
+#include "debug.h"
+
 #include "libmatrix.h"
 #include "matrix-api.h"
 #include "matrix-e2e.h"
@@ -1491,4 +1495,91 @@ void matrix_room_send_message(PurpleConversation *conv, const gchar *message)
 
     g_free(message_to_send);
     g_free(message_dup);
+}
+
+/* ************************************************************************** */
+
+
+#define NUM_MEMBERS_STR_MAX_SIZE    10
+static void _roomlist_parse_chunk(JsonArray *chunk_array, guint chunk_idx,
+        JsonNode *chunk, gpointer user_data)
+{
+    PurpleRoomlist *roomlist = user_data;
+    PurpleRoomlistRoom *room;
+    JsonObject *chunk_obj;
+    const gchar *room_id;
+    gint num_joined_members;
+    gchar *num_joined_members_str;
+
+    chunk_obj = matrix_json_node_get_object(chunk);
+    if (chunk_obj == NULL) {
+        return;
+    }
+
+    room_id = matrix_json_object_get_string_member(chunk_obj, "room_id");
+    room = purple_roomlist_room_new(PURPLE_ROOMLIST_ROOMTYPE_ROOM, room_id, NULL);
+
+    purple_roomlist_room_add_field(roomlist, room, room_id);
+
+    purple_roomlist_room_add_field(roomlist, room, matrix_json_object_get_string_member(chunk_obj, "name"));
+    purple_roomlist_room_add_field(roomlist, room, matrix_json_object_get_string_member(chunk_obj, "topic"));
+
+    // Pass num_joined_members as a string, as expected by matrix_connection_join_room()
+    num_joined_members = matrix_json_object_get_int_member(chunk_obj, "num_joined_members");
+    num_joined_members_str = (gchar *)malloc(NUM_MEMBERS_STR_MAX_SIZE);
+    if (num_joined_members_str) {
+        g_snprintf(num_joined_members_str, NUM_MEMBERS_STR_MAX_SIZE, "%d", num_joined_members);
+        purple_roomlist_room_add_field(roomlist, room, num_joined_members_str);
+    }
+
+	purple_roomlist_room_add(roomlist, room);
+}
+
+static void _roomlist_got_list(MatrixConnectionData *conn,
+        gpointer user_data,
+        JsonNode *json_root,
+        const char *raw_body, size_t raw_body_len, const char *content_type)
+{
+    PurpleRoomlist *roomlist = user_data;
+    JsonObject *rooms;
+    JsonArray *chunk_array;
+
+    if (json_root == NULL)
+        return;
+    rooms = matrix_json_node_get_object(json_root);
+    chunk_array = matrix_json_object_get_array_member(rooms, "chunk");
+
+    json_array_foreach_element(chunk_array, _roomlist_parse_chunk, roomlist);
+
+    purple_roomlist_set_in_progress(roomlist, FALSE);
+}
+
+PurpleRoomlist *matrixprpl_roomlist_get_list(PurpleConnection *pc)
+{
+    MatrixConnectionData *conn;
+    PurpleRoomlist *roomlist;
+    GList *fields = NULL;
+    PurpleRoomlistField *f;
+
+    conn = purple_connection_get_protocol_data(pc);
+    roomlist = purple_roomlist_new(purple_connection_get_account(pc));
+
+    f = purple_roomlist_field_new(PURPLE_ROOMLIST_FIELD_STRING, _("ID"), PRPL_CHAT_INFO_ROOM_ID, TRUE);
+    fields = g_list_append(fields, f);
+
+    f = purple_roomlist_field_new(PURPLE_ROOMLIST_FIELD_STRING, _("Name"), "name", FALSE);
+    fields = g_list_append(fields, f);
+
+    f = purple_roomlist_field_new(PURPLE_ROOMLIST_FIELD_STRING, _("Topic"), "topic", FALSE);
+    fields = g_list_append(fields, f);
+
+    f = purple_roomlist_field_new(PURPLE_ROOMLIST_FIELD_STRING, _("Users"), "num_joined_members", FALSE);
+    fields = g_list_append(fields, f);
+
+    purple_roomlist_set_fields(roomlist, fields);
+    purple_roomlist_set_in_progress(roomlist, TRUE);
+
+    matrix_api_get_public_rooms(conn, _roomlist_got_list, NULL, NULL, roomlist);
+
+    return roomlist;
 }
